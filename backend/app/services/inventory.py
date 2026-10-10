@@ -86,7 +86,10 @@ def bulk_update_inventory(db: Session, payload: BulkInventoryUpdate) -> list[dic
             select(InventoryItem)
             .where(InventoryItem.menu_item_id.in_(requested.keys()))
             .order_by(InventoryItem.menu_item_id)
-            .with_for_update()
+            # The relationship uses lazy="joined", which adds a LEFT OUTER JOIN
+            # to menu_items. Lock only inventory rows; PostgreSQL cannot apply
+            # FOR UPDATE to the nullable side of that outer join.
+            .with_for_update(of=InventoryItem)
         ).all()
         by_menu_id = {row.menu_item_id: row for row in rows}
 
