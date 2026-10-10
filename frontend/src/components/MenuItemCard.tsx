@@ -1,28 +1,24 @@
 "use client";
 
-import { useState } from "react";
 import { Minus, Plus } from "lucide-react";
 import type { MenuItem } from "@/lib/api";
-import { inventoryApi, ApiError } from "@/lib/api";
 
 interface MenuItemCardProps {
   item: MenuItem;
+  quantityOnHand: number;
+  onQuantityChange: (menuItemId: number, nextOnHand: number) => void;
   onEdit: (item: MenuItem) => void;
   onDelete: (item: MenuItem) => void;
-  onInventorySaved: (menuItemId: number, onHand: number, reserved: number) => void;
-  onInventoryError: (msg: string) => void;
 }
 
 export default function MenuItemCard({
   item,
+  quantityOnHand,
+  onQuantityChange,
   onEdit,
   onDelete,
-  onInventorySaved,
-  onInventoryError,
 }: MenuItemCardProps) {
-  const [saving, setSaving] = useState(false);
-
-  const onHand = item.quantity_on_hand ?? 0;
+  const onHand = quantityOnHand;
   const reserved = item.quantity_reserved ?? 0;
 
   const isNonVeg = item.dietary_tags.includes("non_vegetarian");
@@ -36,20 +32,10 @@ export default function MenuItemCard({
     ? "border-t-green-500 border-r-green-500"
     : "";
 
-  async function change(delta: number) {
+  function change(delta: number) {
     const next = onHand + delta;
-    if (next < reserved || saving) return;
-    setSaving(true);
-    try {
-      const rec = await inventoryApi.update(item.id, { quantity_on_hand: next });
-      onInventorySaved(item.id, rec.quantity_on_hand, rec.quantity_reserved);
-    } catch (err) {
-      onInventoryError(
-        err instanceof ApiError ? err.detail : "Failed to update inventory."
-      );
-    } finally {
-      setSaving(false);
-    }
+    if (next < reserved) return;
+    onQuantityChange(item.id, next);
   }
 
   return (
@@ -61,12 +47,12 @@ export default function MenuItemCard({
         {item.name}
       </h3>
 
-      {/* Center: quantity */}
+      {/* Center: local-only quantity controls */}
       <div className="flex items-center gap-3">
         <button
           type="button"
           onClick={() => change(-1)}
-          disabled={saving || onHand - 1 < reserved}
+          disabled={onHand - 1 < reserved}
           aria-label={`Decrease stock for ${item.name}`}
           className="w-9 h-9 rounded-lg bg-zinc-100 border border-zinc-400 text-zinc-900 flex items-center justify-center hover:bg-zinc-200 disabled:opacity-40"
         >
@@ -80,9 +66,8 @@ export default function MenuItemCard({
         <button
           type="button"
           onClick={() => change(1)}
-          disabled={saving}
           aria-label={`Increase stock for ${item.name}`}
-          className="w-9 h-9 rounded-lg bg-zinc-100 border border-zinc-400 text-zinc-900 flex items-center justify-center hover:bg-zinc-200 disabled:opacity-40"
+          className="w-9 h-9 rounded-lg bg-zinc-100 border border-zinc-400 text-zinc-900 flex items-center justify-center hover:bg-zinc-200"
         >
           <Plus className="w-4 h-4 text-zinc-900" strokeWidth={2.5} />
         </button>

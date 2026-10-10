@@ -10,8 +10,9 @@ import {
   Coffee,
   UtensilsCrossed,
   Loader2,
+  Save,
 } from "lucide-react";
-import type { MenuItem } from "@/lib/api";
+import { ApiError, inventoryApi, type MenuItem } from "@/lib/api";
 import { useDashboardStore } from "@/store/dashboard";
 import { useToast } from "@/hooks/useToast";
 import { ToastContainer } from "@/components/Toast";
@@ -50,6 +51,8 @@ export default function DashboardPage() {
   ); // undefined = closed, null = create, MenuItem = edit
   const [deleteTarget, setDeleteTarget] = useState<MenuItem | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [inventoryDrafts, setInventoryDrafts] = useState<Record<number, number>>({});
+  const [savingInventory, setSavingInventory] = useState(false);
 
   // Initial fetch
   useEffect(() => {
@@ -77,6 +80,17 @@ export default function DashboardPage() {
       return matchCat && matchSearch;
     });
   }, [items, search, activeCategory]);
+
+  // Only quantities that differ from the last server-loaded value are pending.
+  const pendingInventoryChanges = useMemo(
+    () =>
+      items.filter(
+        (item) =>
+          (inventoryDrafts[item.id] ?? item.quantity_on_hand ?? 0) !==
+          (item.quantity_on_hand ?? 0)
+      ),
+    [items, inventoryDrafts]
+  );
 
   // Inventory stats
   const stats = useMemo(() => {
@@ -108,13 +122,64 @@ export default function DashboardPage() {
 
   function handleDeleted(id: number) {
     removeItem(id);
+    setInventoryDrafts((current) => {
+      const next = { ...current };
+      delete next[id];
+      return next;
+    });
     setDeleteTarget(null);
     success("Menu item deleted.");
   }
 
-  function handleInventorySaved(menuItemId: number, onHand: number, reserved: number) {
-    updateInventoryLocal(menuItemId, onHand, reserved);
-    success("Stock updated.");
+  function handleInventoryQuantityChange(menuItemId: number, nextOnHand: number) {
+    const item = items.find((candidate) => candidate.id === menuItemId);
+    if (!item) return;
+
+    const savedOnHand = item.quantity_on_hand ?? 0;
+    setInventoryDrafts((current) => {
+      const next = { ...current };
+      if (nextOnHand === savedOnHand) {
+        delete next[menuItemId];
+      } else {
+        next[menuItemId] = nextOnHand;
+      }
+      return next;
+    });
+  }
+
+  async function handleApplyInventoryChanges() {
+    if (savingInventory || pendingInventoryChanges.length === 0) return;
+
+    setSavingInventory(true);
+    try {
+      const records = await inventoryApi.updateBulk(
+        pendingInventoryChanges.map((item) => ({
+          menu_item_id: item.id,
+          quantity_on_hand:
+            inventoryDrafts[item.id] ?? item.quantity_on_hand ?? 0,
+        }))
+      );
+
+      records.forEach((record) => {
+        updateInventoryLocal(
+          record.menu_item_id,
+          record.quantity_on_hand,
+          record.quantity_reserved
+        );
+      });
+      setInventoryDrafts({});
+      success(
+        `Stock updated for ${records.length} ${records.length === 1 ? "item" : "items"}.`
+      );
+    } catch (err) {
+      toastError(
+        err instanceof ApiError
+          ? err.detail
+          : "Failed to apply inventory changes. Your edits are still here."
+      );
+    } finally {
+      setSavingInventory(false);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -289,15 +354,39 @@ export default function DashboardPage() {
 
         {/* Item count (when loaded) */}
         {!loading && !error && items.length > 0 && (
-          <p className="text-sm text-zinc-500 mb-4">
-            Showing{" "}
-            <span className="font-semibold text-zinc-800">{filtered.length}</span>{" "}
-            of{" "}
-            <span className="font-semibold text-zinc-800">{items.length}</span>{" "}
-            items
-            {activeCategory !== "All" && ` in ${activeCategory}`}
-            {search && ` matching "${search}"`}
-          </p>
+          <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <p className="text-sm text-zinc-500">
+              Showing{" "}
+              <span className="font-semibold text-zinc-800">{filtered.length}</span>{" "}
+              of{" "}
+              <span className="font-semibold text-zinc-800">{items.length}</span>{" "}
+              items
+              {activeCategory !== "All" && ` in ${activeCategory}`}
+              {search && ` matching "${search}"`}
+            </p>
+
+            <div className="flex items-center gap-3">
+              {pendingInventoryChanges.length > 0 && (
+                <span className="text-xs font-medium text-amber-700">
+                  {pendingInventoryChanges.length} unsaved{" "}
+                  {pendingInventoryChanges.length === 1 ? "change" : "changes"}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={handleApplyInventoryChanges}
+                disabled={savingInventory || pendingInventoryChanges.length === 0}
+                className="flex items-center justify-center gap-2 rounded-xl bg-amber-600 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-amber-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {savingInventory ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <Save className="h-4 w-4" />
+                )}
+                {savingInventory ? "Applying..." : "Apply Changes"}
+              </button>
+            </div>
+          </div>
         )}
 
         {/* Empty state — no items in DB */}
@@ -350,10 +439,10 @@ export default function DashboardPage() {
               <MenuItemCard
                 key={item.id}
                 item={item}
+                quantityOnHand={inventoryDrafts[item.id] ?? item.quantity_on_hand ?? 0}
+                onQuantityChange={handleInventoryQuantityChange}
                 onEdit={(i) => setModalItem(i)}
                 onDelete={(i) => setDeleteTarget(i)}
-                onInventorySaved={handleInventorySaved}
-                onInventoryError={toastError}
               />
             ))}
           </div>

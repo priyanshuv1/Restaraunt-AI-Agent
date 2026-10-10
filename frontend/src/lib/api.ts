@@ -67,6 +67,11 @@ export interface InventoryUpdate {
   quantity_on_hand: number;
 }
 
+export interface BulkInventoryUpdateItem {
+  menu_item_id: number;
+  quantity_on_hand: number;
+}
+
 // ---------------------------------------------------------------------------
 // Error class
 // ---------------------------------------------------------------------------
@@ -168,6 +173,13 @@ export const inventoryApi = {
     return request<InventoryRecord>(`/api/inventory/${menuItemId}`, {
       method: "PATCH",
       body: JSON.stringify(payload),
+    });
+  },
+
+  updateBulk(items: BulkInventoryUpdateItem[]) {
+    return request<InventoryRecord[]>("/api/inventory/bulk", {
+      method: "PATCH",
+      body: JSON.stringify({ items }),
     });
   },
 };
