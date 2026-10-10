@@ -7,7 +7,7 @@ default, but the schema is still created so ORM relationships work.
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -165,3 +165,82 @@ def test_delete_menu_item_removes_inventory(client):
     assert client.delete(f"/api/menu/{item_id}").status_code == 204
     # Menu item gone
     assert client.get(f"/api/menu/{item_id}").status_code == 404
+
+
+
+# ---------------------------------------------------------------------------
+# Bulk inventory save tests
+# ---------------------------------------------------------------------------
+
+def _ensure_inventory_row(menu_item_id, quantity_on_hand=0, quantity_reserved=0):
+    """Ensure a test inventory row exists and set its starting quantities."""
+    with TestingSession() as db:
+        inv = db.scalar(
+            select(InventoryItem).where(InventoryItem.menu_item_id == menu_item_id)
+        )
+        if inv is None:
+            inv = InventoryItem(
+                menu_item_id=menu_item_id,
+                quantity_on_hand=quantity_on_hand,
+                quantity_reserved=quantity_reserved,
+            )
+            db.add(inv)
+        else:
+            inv.quantity_on_hand = quantity_on_hand
+            inv.quantity_reserved = quantity_reserved
+        db.commit()
+
+
+def test_bulk_inventory_update_saves_all_items(client):
+    first = _create_item(client, "Bulk Cappuccino", "Coffee", "150")
+    second = _create_item(client, "Bulk Burger", "Meals", "180")
+    _ensure_inventory_row(first["id"])
+    _ensure_inventory_row(second["id"])
+
+    response = client.patch(
+        "/api/inventory/bulk",
+        json={"items": [
+            {"menu_item_id": first["id"], "quantity_on_hand": 10},
+            {"menu_item_id": second["id"], "quantity_on_hand": 6},
+        ]},
+    )
+
+    assert response.status_code == 200
+    assert {
+        row["menu_item_id"]: row["quantity_on_hand"] for row in response.json()
+    } == {first["id"]: 10, second["id"]: 6}
+
+
+def test_bulk_inventory_update_rolls_back_entire_batch_on_reservation_error(client):
+    first = _create_item(client, "Rollback Cappuccino", "Coffee", "150")
+    second = _create_item(client, "Rollback Burger", "Meals", "180")
+    _ensure_inventory_row(first["id"], quantity_on_hand=2)
+    _ensure_inventory_row(second["id"], quantity_on_hand=5, quantity_reserved=4)
+
+    response = client.patch(
+        "/api/inventory/bulk",
+        json={"items": [
+            {"menu_item_id": first["id"], "quantity_on_hand": 10},
+            {"menu_item_id": second["id"], "quantity_on_hand": 3},
+        ]},
+    )
+
+    assert response.status_code == 422
+    assert client.get(f"/api/inventory/{first['id']}").json()["quantity_on_hand"] == 2
+    assert client.get(f"/api/inventory/{second['id']}").json()["quantity_on_hand"] == 5
+
+
+def test_bulk_inventory_update_rejects_duplicate_ids(client):
+    item = _create_item(client, "Duplicate Bulk Item", "Coffee", "90")
+    _ensure_inventory_row(item["id"])
+
+    response = client.patch(
+        "/api/inventory/bulk",
+        json={"items": [
+            {"menu_item_id": item["id"], "quantity_on_hand": 10},
+            {"menu_item_id": item["id"], "quantity_on_hand": 11},
+        ]},
+    )
+
+    assert response.status_code == 422
+    assert client.get(f"/api/inventory/{item['id']}").json()["quantity_on_hand"] == 0
