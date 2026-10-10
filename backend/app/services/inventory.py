@@ -1,14 +1,9 @@
 """Inventory service.
 
 Business rules enforced here:
-  1. quantity_on_hand must be >= 0  (also enforced by DB CHECK constraint)
-  2. quantity_on_hand must be >= quantity_reserved; otherwise available stock
-     would go negative, which would represent a broken reservation state.
-  3. An inventory row is created automatically whenever a menu item is created.
-
-This service is intentionally kept stateless (no in-memory cache) so that a
-future MCP tool can call check_inventory(menu_item_id) and always read the
-latest committed value from PostgreSQL.
+  1. quantity_on_hand must be >= 0 (also enforced by DB CHECK constraint)
+  2. quantity_on_hand must be >= quantity_reserved.
+  3. Inventory reads always come from the database; no in-memory cache is used.
 """
 
 from fastapi import HTTPException, status
@@ -17,12 +12,8 @@ from sqlalchemy.orm import Session
 
 from app.models.inventory import InventoryItem
 from app.models.menu import MenuItem
-from app.schemas.inventory import InventoryRead, InventoryUpdate
+from app.schemas.inventory import BulkInventoryUpdate, InventoryUpdate
 
-
-# ---------------------------------------------------------------------------
-# Internal helper: build InventoryRead dict from ORM object
-# ---------------------------------------------------------------------------
 
 def _to_read(inv: InventoryItem) -> dict:
     item = inv.menu_item
@@ -32,7 +23,6 @@ def _to_read(inv: InventoryItem) -> dict:
         "quantity_reserved": inv.quantity_reserved,
         "quantity_available": inv.quantity_available,
         "updated_at": inv.updated_at,
-        # Flattened menu item fields
         "item_id": item.id,
         "item_name": item.name,
         "item_category": item.category,
@@ -43,10 +33,6 @@ def _to_read(inv: InventoryItem) -> dict:
     }
 
 
-# ---------------------------------------------------------------------------
-# Public API (called by routes and future MCP tools)
-# ---------------------------------------------------------------------------
-
 def list_inventory(db: Session) -> list[dict]:
     """Return all inventory rows joined with menu item data, ordered by category + name."""
     rows = db.scalars(
@@ -54,48 +40,33 @@ def list_inventory(db: Session) -> list[dict]:
         .join(InventoryItem.menu_item)
         .order_by(MenuItem.category, MenuItem.name)
     ).all()
-    return [_to_read(r) for r in rows]
+    return [_to_read(row) for row in rows]
 
 
 def check_inventory(db: Session, menu_item_id: int) -> dict:
-    """
-    Retrieve the current inventory for a single menu item.
-
-    Designed to be called by the future DineMate AI agent via an MCP tool.
-    Always reads from the database — never returns stale cached values.
-
-    Raises 404 if the menu item does not exist.
-    """
+    """Read the latest committed inventory for one menu item."""
     inv = _get_or_404(db, menu_item_id)
     return _to_read(inv)
+
+
+def _validate_quantity(inv: InventoryItem, quantity_on_hand: int) -> None:
+    if quantity_on_hand < inv.quantity_reserved:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Cannot set on-hand quantity to {quantity_on_hand}. "
+                f"There are {inv.quantity_reserved} units currently reserved by "
+                f"open orders. Minimum allowed on-hand quantity: {inv.quantity_reserved}."
+            ),
+        )
 
 
 def update_inventory(
     db: Session, menu_item_id: int, payload: InventoryUpdate
 ) -> dict:
-    """
-    Update the physical stock count for a menu item.
-
-    Rules:
-    - The new quantity_on_hand must be >= the current quantity_reserved.
-      If active reservations exist, we cannot set on_hand below them —
-      that would cause available to go negative.
-    - Staff set the *absolute* on_hand count (not a delta).
-    - quantity_reserved is not touched by this endpoint; only order
-      processing adjusts reservations.
-    """
+    """Update one item's absolute physical stock count."""
     inv = _get_or_404(db, menu_item_id)
-
-    if payload.quantity_on_hand < inv.quantity_reserved:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=(
-                f"Cannot set on-hand quantity to {payload.quantity_on_hand}. "
-                f"There are {inv.quantity_reserved} units currently reserved by "
-                f"open orders. Available stock would become negative. "
-                f"Minimum allowed on-hand quantity: {inv.quantity_reserved}."
-            ),
-        )
+    _validate_quantity(inv, payload.quantity_on_hand)
 
     inv.quantity_on_hand = payload.quantity_on_hand
     db.commit()
@@ -103,11 +74,57 @@ def update_inventory(
     return _to_read(inv)
 
 
+def bulk_update_inventory(db: Session, payload: BulkInventoryUpdate) -> list[dict]:
+    """Save all requested inventory counts in one database transaction.
+
+    All rows are fetched and validated before any quantity is mutated. A single
+    commit applies the batch; any error rolls the entire transaction back.
+    """
+    requested = {item.menu_item_id: item.quantity_on_hand for item in payload.items}
+    try:
+        rows = db.scalars(
+            select(InventoryItem)
+            .where(InventoryItem.menu_item_id.in_(requested.keys()))
+            .order_by(InventoryItem.menu_item_id)
+            .with_for_update()
+        ).all()
+        by_menu_id = {row.menu_item_id: row for row in rows}
+
+        missing_ids = sorted(set(requested) - set(by_menu_id))
+        if missing_ids:
+            missing_menu_ids = [
+                item_id for item_id in missing_ids if db.get(MenuItem, item_id) is None
+            ]
+            if missing_menu_ids:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Menu item(s) not found: {missing_menu_ids}",
+                )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Inventory record missing for menu item(s): {missing_ids}",
+            )
+
+        # Validate every requested quantity before changing any ORM object.
+        for menu_item_id, quantity in requested.items():
+            _validate_quantity(by_menu_id[menu_item_id], quantity)
+
+        for menu_item_id, quantity in requested.items():
+            by_menu_id[menu_item_id].quantity_on_hand = quantity
+
+        db.flush()
+        db.commit()
+
+        for menu_item_id in requested:
+            db.refresh(by_menu_id[menu_item_id])
+        return [_to_read(by_menu_id[item_id]) for item_id in requested]
+    except Exception:
+        db.rollback()
+        raise
+
+
 def create_inventory_for_item(db: Session, menu_item_id: int) -> InventoryItem:
-    """
-    Create a new inventory row for a freshly created menu item.
-    Called automatically by the menu creation route.
-    """
+    """Create a zero-stock inventory row for a newly created menu item."""
     inv = InventoryItem(menu_item_id=menu_item_id, quantity_on_hand=0, quantity_reserved=0)
     db.add(inv)
     db.commit()
@@ -115,23 +132,16 @@ def create_inventory_for_item(db: Session, menu_item_id: int) -> InventoryItem:
     return inv
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
 def _get_or_404(db: Session, menu_item_id: int) -> InventoryItem:
     inv = db.scalar(
         select(InventoryItem).where(InventoryItem.menu_item_id == menu_item_id)
     )
     if inv is None:
-        # Check whether the menu item itself exists to give a better error
         item = db.get(MenuItem, menu_item_id)
         if item is None:
             raise HTTPException(404, f"Menu item {menu_item_id} not found")
-        # Item exists but inventory row is missing (shouldn't happen after migration)
         raise HTTPException(
             500,
-            f"Inventory record missing for menu item {menu_item_id}. "
-            "Run the migration and re-seed.",
+            f"Inventory record missing for menu item {menu_item_id}. Run the migration and re-seed.",
         )
     return inv
