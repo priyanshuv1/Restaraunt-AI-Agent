@@ -1,0 +1,14 @@
+# Frontend local environment and secrets
+frontend/.env*
+!frontend/.env*.example
+
+# Dependencies and generated build files
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+
+# Temporary migration backups
+frontend/.git-backup/
+frontend-*.patch
+frontend-*-backup.tar.gz
