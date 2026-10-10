@@ -13,8 +13,12 @@ app = FastAPI(title="DineMate AI API", version="0.1.0")
 # CORS — allow the Next.js dev server and any configured frontend origin.
 # In production set ALLOWED_ORIGINS to the deployed frontend URL.
 # ---------------------------------------------------------------------------
-_raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000")
-_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+# Always allow the local Next.js development origins, even when
+# ALLOWED_ORIGINS is set for another environment. Add any configured origins too.
+_default_dev_origins = ["http://localhost:3000", "http://127.0.0.1:3000"]
+_raw_origins = os.getenv("ALLOWED_ORIGINS", "")
+_configured_origins = [o.strip() for o in _raw_origins.split(",") if o.strip()]
+_origins = list(dict.fromkeys(_default_dev_origins + _configured_origins))
 
 app.add_middleware(
     CORSMiddleware,
