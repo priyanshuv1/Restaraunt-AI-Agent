@@ -17,7 +17,8 @@ From the repository's `backend/` directory:
 
 1. Activate the project's virtual environment.
 2. Install dependencies: `pip install -r requirements.txt`.
-3. Ensure PostgreSQL is running and `DATABASE_URL` in `.env` points at the correct database.
+3. Ensure PostgreSQL is running and `DATABASE_URL` in `.env` points at the correct database. Export those variables into your shell before running Alembic, because the migration environment reads environment variables:
+   `set -a; source .env; set +a`
 4. Apply migrations: `alembic -c alembic.ini upgrade head`. The migration enables `vector`; the PostgreSQL role needs permission to create the extension, or an administrator must enable it first.
 5. Ensure the menu is populated (for example, run `python seed_menu.py` if you use the sample menu).
 6. Build embeddings for all current items: `python -m app.rag.index_menu`.
