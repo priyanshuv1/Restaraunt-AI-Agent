@@ -1,0 +1,117 @@
+@import "tailwindcss";
+
+/* -------------------------------------------------------------------------
+   Design tokens
+   Using Tailwind v4's @theme inline to expose CSS vars as utilities.
+   The @theme rule is Tailwind v4 syntax — the VSCode CSS warning is a
+   false positive from the standard CSS language server.
+   ------------------------------------------------------------------------- */
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+
+  /* Brand amber used throughout the dashboard */
+  --brand: #d97706;      /* amber-600 */
+  --brand-hover: #b45309; /* amber-700 */
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+/* Dark mode — media-query driven (no class toggle needed for staff dashboard) */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+/* -------------------------------------------------------------------------
+   Base resets
+   ------------------------------------------------------------------------- */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  /* Prevent font size inflation on mobile */
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+  /* Smooth scrolling for anchor links */
+  scroll-behavior: smooth;
+}
+
+/* -------------------------------------------------------------------------
+   Scrollbar styling — subtle, matches zinc palette
+   ------------------------------------------------------------------------- */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #d4d4d8; /* zinc-300 */
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #a1a1aa; /* zinc-400 */
+}
+
+/* -------------------------------------------------------------------------
+   Focus visible — consistent ring across interactive elements
+   (Tailwind focus-visible utilities handle most cases, this is a fallback)
+   ------------------------------------------------------------------------- */
+:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+/* Remove default focus ring on mouse click (keep for keyboard) */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* -------------------------------------------------------------------------
+   Number input — hide spinner arrows (cleaner in inventory qty field)
+   ------------------------------------------------------------------------- */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+/* -------------------------------------------------------------------------
+   Search input — hide the native clear ✕ (we rely on the user clearing)
+   ------------------------------------------------------------------------- */
+input[type="search"]::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+}
+
+/* -------------------------------------------------------------------------
+   Utility: line-clamp polyfill (Tailwind v4 ships this natively, kept for
+   clarity)
+   ------------------------------------------------------------------------- */
+.line-clamp-2 {
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
