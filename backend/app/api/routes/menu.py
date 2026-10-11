@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Response, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.models.menu import MenuItem
+from app.rag.service import index_menu_item
 from app.schemas.menu import MenuItemCreate, MenuItemRead, MenuItemUpdate
 from app.services.inventory import create_inventory_for_item
 from app.services.menu import create_item, list_items, response_data, update_item
@@ -29,24 +30,34 @@ def get_item(item_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=MenuItemRead, status_code=status.HTTP_201_CREATED)
-def add_item(payload: MenuItemCreate, db: Session = Depends(get_db)):
+def add_item(
+    payload: MenuItemCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
     item = create_item(db, payload)
-    # Automatically create the corresponding inventory row so the item
-    # is immediately visible in the inventory dashboard.
     create_inventory_for_item(db, item.id)
-    # Re-fetch so the ORM relationship is loaded (inventory backref)
     db.refresh(item)
+    # Index after the response is prepared so model inference doesn't hold up CRUD.
+    background_tasks.add_task(index_menu_item, item.id)
     return response_data(item)
 
 
 @router.patch("/{item_id}", response_model=MenuItemRead)
-def edit_item(item_id: int, payload: MenuItemUpdate, db: Session = Depends(get_db)):
+def edit_item(
+    item_id: int,
+    payload: MenuItemUpdate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
     item = db.get(MenuItem, item_id)
     if item is None:
         raise HTTPException(404, "Menu item not found")
     if not payload.model_fields_set:
         raise HTTPException(422, "Provide at least one field to update")
-    return response_data(update_item(db, item, payload))
+    updated = update_item(db, item, payload)
+    background_tasks.add_task(index_menu_item, updated.id)
+    return response_data(updated)
 
 
 @router.delete("/{item_id}", status_code=status.HTTP_204_NO_CONTENT)
