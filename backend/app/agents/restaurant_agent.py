@@ -42,6 +42,8 @@ class AgentState(TypedDict, total=False):
     resolved: list[dict[str, Any]]
     reply: str
     confirmed: bool
+    emotion: str
+    total: str
     order_result: dict[str, Any]
 
 
