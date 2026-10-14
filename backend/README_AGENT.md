@@ -28,17 +28,17 @@ Keep `.env` out of Git. Never send API keys in chat or logs.
 
 ## Database migration and grants
 
-The new migration adds `agent_sessions`, `orders`, and `order_items`. Back up important data before applying schema changes. Run migrations as a database owner/administrator, not as the limited runtime role:
+The new migration adds `agent_sessions`, `orders`, and `order_items`. Back up important data before applying schema changes. Run migrations with a `DATABASE_URL` that authenticates as a database owner/administrator. The limited runtime role may not have permission to create tables. Do not paste the admin URL or password into chat.
+
+From `backend/`, with the virtual environment active, set the admin connection only in your local shell and run:
 
 ```bash
-cd backend
-source .venv/bin/activate
-set -a
-source .env
-set +a
-# Run Alembic using your local PostgreSQL administrator connection.
+# Set DATABASE_URL to your local PostgreSQL administrator connection.
+export DATABASE_URL='postgresql+psycopg://ADMIN_USER:ADMIN_PASSWORD@localhost:5432/dinemate'
 alembic upgrade head
 ```
+
+After migration, configure the runtime application's normal DATABASE_URL again and apply the grants below as an administrator.
 
 If the runtime role is `dinemate_app`, grant only the permissions needed by the agent. Run as a PostgreSQL administrator after the migration:
 
