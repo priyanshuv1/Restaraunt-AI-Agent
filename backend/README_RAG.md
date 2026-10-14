@@ -27,6 +27,14 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+For one-off CLI commands such as indexing or Alembic, load the environment file into the shell first (the API also loads it when started with `--env-file`):
+
+```bash
+set -a
+source .env
+set +a
+```
+
 ## How retrieval works
 
 1. The API embeds the user's natural-language query locally.
@@ -38,7 +46,7 @@ Price and stock are intentionally excluded from embedded text and Qdrant payload
 
 ## Indexing
 
-After PostgreSQL is configured and contains menu items, configure Qdrant, then run from `backend/`:
+After PostgreSQL is configured and contains menu items, configure Qdrant and load `.env` into the shell as shown above, then run from `backend/`:
 
 ```bash
 python -m app.rag.index_menu
