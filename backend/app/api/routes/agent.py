@@ -1,6 +1,6 @@
 """Customer-facing API for the DineMate ordering agent."""
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -24,6 +24,7 @@ class AgentChatRequest(BaseModel):
 class AgentChatResponse(BaseModel):
     session_id: str
     reply: str
+    emotion: Literal["neutral", "happy", "curious", "empathetic", "apologetic", "excited"] = "neutral"
     draft_order: list[dict[str, Any]]
     total: str
     order: dict[str, Any] | None = None
@@ -73,6 +74,7 @@ async def chat(payload: AgentChatRequest, db: Session = Depends(get_db)):
     return AgentChatResponse(
         session_id=session_id,
         reply=reply,
+        emotion=result.get("emotion", "neutral"),
         draft_order=session.draft_order or [],
         total=_draft_total(session.draft_order or []),
         order=result.get("order_result") if isinstance(result.get("order_result"), dict) and not result["order_result"].get("error") else None,
