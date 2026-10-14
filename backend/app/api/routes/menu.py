@@ -9,6 +9,7 @@ from app.services.inventory import create_inventory_for_item
 from app.services.menu import create_item, list_items, response_data, update_item
 
 router = APIRouter(prefix="/api/menu", tags=["menu"])
+RAG_FIELDS = {"name", "category", "description", "dietary_tags"}
 
 
 @router.get("", response_model=list[MenuItemRead])
@@ -23,8 +24,7 @@ def get_menu(
 
 @router.get("/{item_id}", response_model=MenuItemRead)
 def get_item(item_id: int, db: Session = Depends(get_db)):
-    item = db.get(MenuItem, item_id)
-    if item is None:
+    if (item := db.get(MenuItem, item_id)) is None:
         raise HTTPException(404, "Menu item not found")
     return response_data(item)
 
@@ -52,12 +52,14 @@ def edit_item(
     item = db.get(MenuItem, item_id)
     if item is None:
         raise HTTPException(404, "Menu item not found")
-    if not payload.model_fields_set:
+    changed_fields = set(payload.model_fields_set)
+    if not changed_fields:
         raise HTTPException(422, "Provide at least one field to update")
     updated = update_item(db, item, payload)
-    # Re-index is cheap compared with a full collection rebuild; the embedding
-    # text only changes when descriptive fields change, but this keeps updates safe.
-    background_tasks.add_task(index_menu_item, updated.id)
+    # Price and availability are live SQL fields, so only descriptive changes
+    # require a new embedding. Inventory updates never trigger menu re-indexing.
+    if changed_fields & RAG_FIELDS:
+        background_tasks.add_task(index_menu_item, updated.id)
     return response_data(updated)
 
 
