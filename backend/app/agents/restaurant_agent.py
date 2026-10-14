@@ -27,6 +27,10 @@ class RequestPlan(BaseModel):
         default=False,
         description="True only when the current message clearly authorizes placing the current draft order",
     )
+    emotion: Literal["neutral", "happy", "curious", "empathetic", "apologetic", "excited"] = Field(
+        default="neutral",
+        description="Concise assistant delivery emotion for a future voice/avatar client; choose a natural, restrained expression.",
+    )
 
 
 class AgentState(TypedDict, total=False):
@@ -45,6 +49,7 @@ SYSTEM_PROMPT = """You are DineMate, a polite restaurant ordering assistant.
 You only help customers discover menu items and prepare or place restaurant orders.
 Use intent=add when the customer asks to add/order specific items; recommend when they are exploring.
 Use intent=review to review the cart, confirm only when the current message explicitly authorizes placing the pending order, cancel to clear the draft, and other for unrelated or unclear requests.
+Choose an appropriate assistant emotion from neutral, happy, curious, empathetic, apologetic, or excited. Keep it subtle and suitable for a restaurant assistant.
 Never invent menu items, prices, stock, ingredients, or dietary facts. Tool results and PostgreSQL are authoritative.
 Do not treat a question, a hypothetical, or a request to show the draft as confirmation.
 If the customer is ambiguous, ask a concise clarification instead of guessing.
@@ -172,7 +177,7 @@ async def run_agent_turn(
                 ),
             ]
         )
-        return {"plan": plan.model_dump(), "confirmed": False}
+        return {"plan": plan.model_dump(), "emotion": plan.emotion, "confirmed": False}
 
     async def resolve_and_validate(state: AgentState) -> dict[str, Any]:
         plan = state["plan"]
@@ -309,10 +314,11 @@ async def run_agent_turn(
         if not isinstance(result, dict) or result.get("error"):
             details = result.get("details", []) if isinstance(result, dict) else []
             reason = "; ".join(details) if details else (result.get("error", "Please review the draft and try again.") if isinstance(result, dict) else "Please review the draft and try again.")
-            return {"reply": f"I couldn't place the order: {reason}", "order_result": result, "confirmed": False}
+            return {"reply": f"I couldn't place the order: {reason}", "order_result": result, "confirmed": False, "emotion": "apologetic"}
         return {
             "order_result": result,
             "draft_order": [],
+            "emotion": "happy",
             "reply": (
                 f"Your order #{result['order_id']} is confirmed. Total: {_money(result['total_amount'])}. "
                 "Your items have been reserved. Payment is not handled in this version."
