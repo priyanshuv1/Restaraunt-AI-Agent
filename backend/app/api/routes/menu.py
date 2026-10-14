@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.models.menu import MenuItem
-from app.rag.service import index_menu_item
+from app.rag.service import delete_menu_vector, index_menu_item
 from app.schemas.menu import MenuItemCreate, MenuItemRead, MenuItemUpdate
 from app.services.inventory import create_inventory_for_item
 from app.services.menu import create_item, list_items, response_data, update_item
@@ -38,7 +38,6 @@ def add_item(
     item = create_item(db, payload)
     create_inventory_for_item(db, item.id)
     db.refresh(item)
-    # Index after the response is prepared so model inference doesn't hold up CRUD.
     background_tasks.add_task(index_menu_item, item.id)
     return response_data(item)
 
@@ -56,6 +55,8 @@ def edit_item(
     if not payload.model_fields_set:
         raise HTTPException(422, "Provide at least one field to update")
     updated = update_item(db, item, payload)
+    # Re-index is cheap compared with a full collection rebuild; the embedding
+    # text only changes when descriptive fields change, but this keeps updates safe.
     background_tasks.add_task(index_menu_item, updated.id)
     return response_data(updated)
 
@@ -67,4 +68,5 @@ def delete_item(item_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "Menu item not found")
     db.delete(item)
     db.commit()
+    delete_menu_vector(item_id)
     return Response(status_code=204)

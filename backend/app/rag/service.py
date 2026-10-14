@@ -1,14 +1,22 @@
 import logging
+import os
+from functools import lru_cache
 
-from sqlalchemy import func, select
+from qdrant_client import QdrantClient
+from qdrant_client.http import models as qmodels
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.session import SessionLocal
 from app.models.menu import MenuItem
-from app.models.menu_embedding import MenuEmbedding
 from app.rag.embeddings import MODEL_NAME, embed_texts
 
 logger = logging.getLogger(__name__)
+
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
+QDRANT_API_KEY = os.getenv("QDRANT_API_KEY") or None
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "dinemate_menu")
+EMBEDDING_DIMENSIONS = 384
 
 
 def normalize_category(category: str | None) -> str | None:
@@ -20,11 +28,7 @@ def normalize_category(category: str | None) -> str | None:
 
 
 def build_menu_text(item: MenuItem) -> str:
-    """Build the descriptive text embedded for one menu item.
-
-    Deliberately excludes price, stock and availability: those values must be
-    read from the live database/backend rather than semantic search results.
-    """
+    """Build semantic text without volatile price, stock, or availability."""
     raw_tags = item.dietary_tags or ""
     if isinstance(raw_tags, list):
         tags = [str(tag).strip().lower() for tag in raw_tags if str(tag).strip()]
@@ -41,48 +45,73 @@ def build_menu_text(item: MenuItem) -> str:
     return "\n".join(parts)
 
 
-def _upsert_embedding(
-    db: Session, item: MenuItem, content: str, vector: list[float]
-) -> None:
-    category = normalize_category(item.category)
-    if category is None:
-        raise ValueError(f"Menu item {item.id} has an empty category")
+@lru_cache(maxsize=1)
+def get_qdrant_client() -> QdrantClient:
+    """Create one Qdrant client per API process."""
+    return QdrantClient(url=QDRANT_URL, api_key=QDRANT_API_KEY)
 
-    record = db.scalar(
-        select(MenuEmbedding).where(MenuEmbedding.menu_item_id == item.id)
-    )
-    if record is None:
-        record = MenuEmbedding(
-            menu_item_id=item.id,
-            category=category,
-            content=content,
-            embedding=vector,
-            embedding_model=MODEL_NAME,
+
+def ensure_menu_collection() -> None:
+    """Create the DineMate collection if it does not exist yet."""
+    client = get_qdrant_client()
+    if not client.collection_exists(collection_name=QDRANT_COLLECTION):
+        client.create_collection(
+            collection_name=QDRANT_COLLECTION,
+            vectors_config=qmodels.VectorParams(
+                size=EMBEDDING_DIMENSIONS,
+                distance=qmodels.Distance.COSINE,
+            ),
         )
-        db.add(record)
-    else:
-        record.category = category
-        record.content = content
-        record.embedding = vector
-        record.embedding_model = MODEL_NAME
+        client.create_payload_index(
+            collection_name=QDRANT_COLLECTION,
+            field_name="category",
+            field_schema=qmodels.PayloadSchemaType.KEYWORD,
+            wait=True,
+        )
 
 
 def index_menu_item(menu_item_id: int) -> None:
-    """Background task: index the current database version of one menu item."""
+    """Refresh one menu item's semantic point in Qdrant."""
     try:
         with SessionLocal() as db:
             item = db.get(MenuItem, menu_item_id)
             if item is None:
-                # Deleting a menu item cascades to its embedding row.
+                delete_menu_vector(menu_item_id)
                 return
             content = build_menu_text(item)
             vector = embed_texts([content])[0].tolist()
-            _upsert_embedding(db, item, content, vector)
-            db.commit()
+            ensure_menu_collection()
+            get_qdrant_client().upsert(
+                collection_name=QDRANT_COLLECTION,
+                points=[
+                    qmodels.PointStruct(
+                        id=item.id,
+                        vector=vector,
+                        payload={
+                            "menu_item_id": item.id,
+                            "category": normalize_category(item.category),
+                            "content": content,
+                        },
+                    )
+                ],
+                wait=True,
+            )
     except Exception:
-        # Indexing must not turn a successful menu CRUD response into a failure.
-        # The exception is logged so an operator can diagnose missing embeddings.
-        logger.exception("Failed to index menu item %s for RAG", menu_item_id)
+        logger.exception("Failed to index menu item %s in Qdrant", menu_item_id)
+
+
+def delete_menu_vector(menu_item_id: int) -> None:
+    """Delete a menu item's Qdrant point; failures are logged for later cleanup."""
+    try:
+        client = get_qdrant_client()
+        if client.collection_exists(collection_name=QDRANT_COLLECTION):
+            client.delete(
+                collection_name=QDRANT_COLLECTION,
+                points_selector=qmodels.PointIdsList(points=[menu_item_id]),
+                wait=True,
+            )
+    except Exception:
+        logger.exception("Failed to delete menu item %s from Qdrant", menu_item_id)
 
 
 def search_menu_by_embedding(
@@ -91,23 +120,49 @@ def search_menu_by_embedding(
     category: str | None = None,
     top_k: int = 5,
 ) -> list[dict]:
-    """Run exact cosine-distance search, optionally filtered by category."""
-    distance = MenuEmbedding.embedding.cosine_distance(query_embedding)
-    stmt = (
-        select(MenuEmbedding, MenuItem, distance.label("cosine_distance"))
-        .join(MenuItem, MenuItem.id == MenuEmbedding.menu_item_id)
+    """Search Qdrant, then hydrate candidates from the authoritative SQL database."""
+    ensure_menu_collection()
+    normalized_category = normalize_category(category)
+    query_filter = None
+    if normalized_category:
+        query_filter = qmodels.Filter(
+            must=[
+                qmodels.FieldCondition(
+                    key="category",
+                    match=qmodels.MatchValue(value=normalized_category),
+                )
+            ]
+        )
+
+    response = get_qdrant_client().query_points(
+        collection_name=QDRANT_COLLECTION,
+        query=query_embedding,
+        query_filter=query_filter,
+        limit=max(1, min(int(top_k), 50)),
+        with_payload=True,
     )
 
-    normalized_category = normalize_category(category)
-    if normalized_category:
-        stmt = stmt.where(MenuEmbedding.category == normalized_category)
+    ranked_ids: list[tuple[int, float]] = []
+    for point in response.points:
+        payload = point.payload or {}
+        item_id = payload.get("menu_item_id", point.id)
+        try:
+            ranked_ids.append((int(item_id), float(point.score)))
+        except (TypeError, ValueError):
+            logger.warning("Skipping Qdrant point with invalid menu item ID: %s", point.id)
 
-    stmt = stmt.order_by(distance).limit(top_k)
-    rows = db.execute(stmt).all()
+    if not ranked_ids:
+        return []
+
+    item_ids = [item_id for item_id, _ in ranked_ids]
+    items = db.scalars(select(MenuItem).where(MenuItem.id.in_(item_ids))).all()
+    items_by_id = {item.id: item for item in items}
 
     matches = []
-    for embedding_record, item, cosine_distance in rows:
-        similarity = max(-1.0, min(1.0, 1.0 - float(cosine_distance)))
+    for item_id, score in ranked_ids:
+        item = items_by_id.get(item_id)
+        if item is None:
+            continue
         raw_tags = item.dietary_tags or ""
         matches.append(
             {
@@ -118,7 +173,7 @@ def search_menu_by_embedding(
                 "dietary_tags": [
                     tag.strip() for tag in raw_tags.split(",") if tag.strip()
                 ],
-                "similarity": round(similarity, 4),
+                "similarity": round(max(-1.0, min(1.0, score)), 4),
             }
         )
     return matches
@@ -130,6 +185,9 @@ def search_menu_knowledge(
     category: str | None = None,
     top_k: int = 5,
 ) -> list[dict]:
-    """Embed a natural-language query and retrieve relevant menu knowledge."""
-    query_embedding = embed_texts([query.strip()])[0].tolist()
+    """Embed a query locally and retrieve relevant menu candidates from Qdrant."""
+    cleaned_query = query.strip()
+    if not cleaned_query:
+        return []
+    query_embedding = embed_texts([cleaned_query])[0].tolist()
     return search_menu_by_embedding(db, query_embedding, category, top_k)
