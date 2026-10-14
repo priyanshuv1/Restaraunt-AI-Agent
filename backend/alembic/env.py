@@ -10,6 +10,8 @@ sys.path.insert(0, os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
 from app.db.base import Base
 from app.models.menu import MenuItem  # noqa: F401
 from app.models.inventory import InventoryItem  # noqa: F401
+from app.models.agent_session import AgentSession  # noqa: F401
+from app.models.orders import Order, OrderItem  # noqa: F401
 
 config = context.config
 if config.config_file_name:
